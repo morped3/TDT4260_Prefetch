@@ -71,7 +71,7 @@ void prefetch_access(AccessStat stat)
 
     // delta correlation:
     int delta_pointer = -1;
-    int delta_size = 3; // 1 for prefetch degree + 2 for match pattern
+    int delta_size = 4; // 1 for prefetch degree + 2 for match pattern
     int32_t delta_buffer[delta_size];
     int32_t delta_comparison[2];
     int32_t pf_addr = stat.mem_addr; // start as address requested, but updated if delta pattern found
@@ -108,12 +108,14 @@ void prefetch_access(AccessStat stat)
         }
         if (pattern_match)
         {
-            pf_addr += delta_buffer[delta_pointer_i];
-            if (!in_cache(pf_addr) && !in_mshr_queue(pf_addr) && 0 <= pf_addr && pf_addr < MAX_PHYS_MEM_ADDR)
-            {
-                issue_prefetch(pf_addr);
+          for (int k = 0; k < 2; k++) {
+              pf_addr += delta_buffer[delta_pointer_i];
+              if (!in_cache(pf_addr) && !in_mshr_queue(pf_addr) && 0 <= pf_addr && pf_addr < MAX_PHYS_MEM_ADDR)
+              {
+                  issue_prefetch(pf_addr);
+              }
+              delta_pointer_i = (delta_pointer_i - 1 + delta_size) % delta_size;
             }
-            delta_pointer_i = (delta_pointer_i - 1 + delta_size) % delta_size;
             break;
         }
       }
