@@ -40,20 +40,44 @@ void prefetch_init(void)
 
 void prefetch_access(AccessStat stat)
 {
-    int16_t index_of_entry = -1;
-    int16_t index_at_entry = -1;
+    int16_t index_of_entry = -1; // index of the entry in index table where PC is found, -1 if PC not stored earlier
+    int16_t index_at_entry = -1; // the index stored at index_of_entry in index table, pointing to a location in GHB
     int32_t pc = stat.pc;
+
+
 
     // Make sure we dont have duplicates in Index table, if found, use that one instead.
     for (int16_t i = 0; i < INDEX_TABLE_SIZE; i++)
     {
         if (index_table[i].pc == pc)
         {
-            index_at_entry = index_table[i].index;
-            index_of_entry = i;
-            break;
+            int16_t index_at_entry_candidate = index_table[i].index;
+            int16_t out_of_bounds = 0;
+            if (index_at_entry_candidate < ghb_pointer) {
+              out_of_bounds = ghb_pointer - index_at_entry_candidate;
+            } else {
+              out_of_bounds = ghb_pointer + 4*GHB_SIZE - index_at_entry_candidate;
+            }
+
+            if (out_of_bounds < GHB_SIZE){
+              index_at_entry = index_at_entry_candidate;
+              index_of_entry = i;
+              break;
+            }
+
+        //    if (!((index_at_entry < ghb_pointer) && (index_at_entry > (ghb_pointer-GHB_SIZE)))) {
+        //      if (!((index_at_entry > ghb_pointer) && (index_at_entry > (ghb_pointer + 3*GHB_SIZE)))) { //legit
+        //        break;
+        //      }
+      //      }
+
+
         }
     }
+
+    // fix GHB prefetch error on wraparound of FIFO: index table might point to a address that is overwritten.
+    // Also if it is soon to be overwritten, the DC prefetch might search into data that is overwritten.
+    // Let ghb_pointer grow large, and compare index_of_entry to it. If ghb_pointer-index_at_entry > ghb_size, it is pointing to overwritten data
 
     // If not in index table, we make a new entry
     if(index_at_entry == -1){
@@ -63,15 +87,16 @@ void prefetch_access(AccessStat stat)
         index_of_entry = it_pointer;
     }
 
-    ghb_pointer = (ghb_pointer + 1) % GHB_SIZE;
-    ghb[ghb_pointer].address = stat.mem_addr;
-    ghb[ghb_pointer].previous = index_at_entry;
+    ghb_pointer = (ghb_pointer + 1) % (4*GHB_SIZE);
+    int16_t ghb_pointer_resize = ghb_pointer % GHB_SIZE;
+    ghb[ghb_pointer_resize].address = stat.mem_addr;
+    ghb[ghb_pointer_resize].previous = index_at_entry;
 
     index_table[index_of_entry].index = ghb_pointer;
 
     // delta correlation:
     int delta_pointer = -1;
-    int delta_size = 4; // 1 for prefetch degree + 2 for match pattern
+    int delta_size = 6; // 1 for prefetch degree + 2 for match pattern
     int32_t delta_buffer[delta_size];
     int32_t delta_comparison[2];
     int32_t pf_addr = stat.mem_addr; // start as address requested, but updated if delta pattern found
@@ -80,11 +105,32 @@ void prefetch_access(AccessStat stat)
     int16_t index_prev_ghb = 0;
 
     for (int i = 0; i < 128; i++) {
-      index_prev_ghb = ghb[index_curr_ghb].previous;
+      int16_t i_curr_ghb_resize = index_curr_ghb % GHB_SIZE;
+      index_prev_ghb = ghb[i_curr_ghb_resize].previous;
       if (index_prev_ghb == -1) {
         break; // get out if we are at the end of the list.
       }
-      int32_t delta = ghb[index_curr_ghb].address - ghb[index_prev_ghb].address;
+      int16_t out_of_bounds = 0;
+      if (index_prev_ghb < ghb_pointer) {
+        out_of_bounds = ghb_pointer - index_prev_ghb;
+      } else {
+        out_of_bounds = ghb_pointer + 4*GHB_SIZE - index_prev_ghb;
+      }
+
+      if (out_of_bounds > GHB_SIZE){
+
+        ghb[i_curr_ghb_resize].previous = -1;
+        break;
+      }
+      /*
+      if (!((index_prev_ghb < ghb_pointer) && (index_prev_ghb > (ghb_pointer-GHB_SIZE)))) {
+        if (!((index_prev_ghb > ghb_pointer) && (index_prev_ghb > (ghb_pointer + 3*GHB_SIZE)))) {
+          ghb[index_curr_ghb % GHB_SIZE].previous = -1;
+          break;
+        }
+      }*/
+      int16_t i_prev_ghb_resize = index_prev_ghb % GHB_SIZE;
+      int32_t delta = ghb[i_curr_ghb_resize].address - ghb[i_prev_ghb_resize].address;
       delta_pointer = (delta_pointer + 1) % delta_size;
       delta_buffer[delta_pointer] = delta;
 
@@ -98,7 +144,7 @@ void prefetch_access(AccessStat stat)
       if (i > delta_size-2) {
         int delta_pointer_i = delta_pointer;
         int pattern_match = 1;
-        for (int k = 0; k < 2; k++)
+        for (int k = 0; k < 2; k++) // Find pattern
         {
             if (delta_buffer[delta_pointer_i] != delta_comparison[1-k])
             {
@@ -108,7 +154,7 @@ void prefetch_access(AccessStat stat)
         }
         if (pattern_match)
         {
-          for (int k = 0; k < 2; k++) {
+          for (int k = 0; k < 4; k++) { // prefetching degree
               pf_addr += delta_buffer[delta_pointer_i];
               if (!in_cache(pf_addr) && !in_mshr_queue(pf_addr) && 0 <= pf_addr && pf_addr < MAX_PHYS_MEM_ADDR)
               {
